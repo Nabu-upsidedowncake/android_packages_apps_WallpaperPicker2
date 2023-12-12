@@ -30,6 +30,7 @@ import android.graphics.Matrix;
 import android.graphics.Point;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
@@ -61,6 +62,37 @@ import java.util.List;
 public class WallpaperConnection extends IWallpaperConnection.Stub implements ServiceConnection {
 
     /**
+     * Defines the different possible scenarios for which we need to dispatch a command
+     * from picker to the wallpaper.
+     */
+
+    public enum WHICH_PREVIEW {
+        /**
+         * Represents the case when we preview a currently applied wallpaper (home/lock) simply
+         * by tapping on it.
+         */
+        PREVIEW_CURRENT(0),
+        /**
+         * Represents the case when we are editing the currently applied wallpaper.
+         */
+        EDIT_CURRENT(1),
+        /**
+         * Represents the case when we are editing a wallpaper that's not currently applied.
+         */
+        EDIT_NON_CURRENT(2);
+
+        private final int mValue;
+
+        WHICH_PREVIEW(int value) {
+            this.mValue = value;
+        }
+
+        public int getValue() {
+            return mValue;
+        }
+    }
+
+    /**
      * Returns whether live preview is available in framework.
      */
     public static boolean isPreviewAvailable() {
@@ -87,6 +119,8 @@ public class WallpaperConnection extends IWallpaperConnection.Stub implements Se
     private boolean mIsEngineVisible;
     private boolean mEngineReady;
     private boolean mDestroyed;
+    private int mDestinationFlag;
+    private WHICH_PREVIEW mWhichPreview;
 
     /**
      * @param intent used to bind the wallpaper service
@@ -95,8 +129,10 @@ public class WallpaperConnection extends IWallpaperConnection.Stub implements Se
      * @param containerView SurfaceView that will display the wallpaper
      */
     public WallpaperConnection(Intent intent, Context context,
-            @Nullable WallpaperConnectionListener listener, @NonNull SurfaceView containerView) {
-        this(intent, context, listener, containerView, null);
+            @Nullable WallpaperConnectionListener listener, @NonNull SurfaceView containerView,
+            WHICH_PREVIEW preview) {
+        this(intent, context, listener, containerView, null, null,
+                preview);
     }
 
     /**
@@ -106,15 +142,22 @@ public class WallpaperConnection extends IWallpaperConnection.Stub implements Se
      * @param containerView SurfaceView that will display the wallpaper
      * @param secondaryContainerView optional SurfaceView that will display a second, mirrored
      *                               version of the wallpaper
+     * @param destinationFlag one of WallpaperManager.FLAG_SYSTEM, WallpaperManager.FLAG_LOCK
+     *                        indicating for which screen we're previewing the wallpaper, or null if
+     *                        unknown
      */
     public WallpaperConnection(Intent intent, Context context,
             @Nullable WallpaperConnectionListener listener, @NonNull SurfaceView containerView,
-            @Nullable SurfaceView secondaryContainerView) {
+            @Nullable SurfaceView secondaryContainerView,
+            @Nullable @WallpaperManager.SetWallpaperFlags Integer destinationFlag,
+            WHICH_PREVIEW preview) {
         mContext = context.getApplicationContext();
         mIntent = intent;
         mListener = listener;
         mContainerView = containerView;
         mSecondContainerView = secondaryContainerView;
+        mDestinationFlag = destinationFlag == null ? WallpaperManager.FLAG_SYSTEM : destinationFlag;
+        mWhichPreview = preview;
     }
 
     /**
@@ -293,6 +336,13 @@ public class WallpaperConnection extends IWallpaperConnection.Stub implements Se
     @Override
     public void engineShown(IWallpaperEngine engine) {
         mEngineReady = true;
+        Bundle bundle = new Bundle();
+        bundle.putInt("which_preview", mWhichPreview.getValue());
+        try {
+            engine.dispatchWallpaperCommand("android.wallpaper.previewinfo", 0, 0, 0, bundle);
+        } catch (RemoteException e) {
+            Log.e(TAG, "Error dispatching wallpaper command: " + mWhichPreview.toString());
+        }
         if (mContainerView != null) {
             mContainerView.post(() -> reparentWallpaperSurface(mContainerView));
         }
@@ -325,6 +375,18 @@ public class WallpaperConnection extends IWallpaperConnection.Stub implements Se
         }
     }
 
+
+    /**
+     * Set the {@link android.app.WallpaperManager.SetWallpaperFlags} to the Engine to indicate
+     * which screen it's being applied/previewed to.
+     */
+    public void setWallpaperFlags(@WallpaperManager.SetWallpaperFlags int wallpaperFlags)
+            throws RemoteException {
+        if (mEngine != null && mEngineReady) {
+            mEngine.setWallpaperFlags(wallpaperFlags);
+        }
+    }
+
     private void attachConnection(int displayId) {
         try {
             try {
@@ -341,7 +403,7 @@ public class WallpaperConnection extends IWallpaperConnection.Stub implements Se
                 mService.attach(this, mContainerView.getWindowToken(),
                         LayoutParams.TYPE_APPLICATION_MEDIA, true, mContainerView.getWidth(),
                         mContainerView.getHeight(), new Rect(0, 0, 0, 0), displayId,
-                        WallpaperManager.FLAG_SYSTEM);
+                        mDestinationFlag);
             }
         } catch (RemoteException e) {
             Log.w(TAG, "Failed attaching wallpaper; clearing", e);
